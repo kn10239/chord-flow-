@@ -111,7 +111,7 @@ body{padding-bottom:var(--dock-height,calc(164px + env(safe-area-inset-bottom)))
 .slotblock{min-height:52px}
 .slotgrid .slotmain{min-height:52px;padding:21px 3px 6px}
 
-/* v2.13.1: compact instrument-style workspace; overflow remains available for small screens. */
+/* v2.14.0: compact instrument-style workspace; overflow remains available for small screens. */
 body{padding:8px 10px var(--dock-height,calc(255px + env(safe-area-inset-bottom)));padding-top:max(8px,env(safe-area-inset-top))}
 .apphead h1{font-size:23px}.apphead small{font-size:10px}.apphead button{min-height:40px}
 .editor{margin:6px 0;padding:8px}.edithead{margin:0 0 3px}.edithead strong{font-size:14px}.edithead small{font-size:11px}.edithead>div>div{display:none}
@@ -172,28 +172,67 @@ function scaleChords(sc,count){
  const types=count===3?[...triadTypes,'sus2','sus4']:[...seventhTypes,'6','m6','7sus4','7♭5','7♯5','add9','madd9'];
  return sc.flatMap(r=>types.filter(t=>isDia([r,t])).map(t=>[r,t]));
 }
-function btn(t,fn,a=false,d=false){let b=document.createElement('button');b.textContent=t;b.className=(a?'active ':'')+(d?'dia':'');b.onclick=fn;return b}N.forEach((n,i)=>$('key').add(new Option(n,i)));Object.entries(SCALES).forEach(([k,s])=>$('scale').add(new Option(s[0],k)));['key','scale','degree','showScale','showPianoScale'].forEach(k=>$(k).onchange=render);function voice(c,prev){let base=T[c[1]].map(n=>48+c[0]+n).map(n=>n>71?n-12:n).sort((a,b)=>a-b);if(!prev)return base;let best=base,cost=Infinity;for(let k=0;k<base.length;k++){let v=base.slice(k).concat(base.slice(0,k).map(n=>n+12));for(let o=-1;o<=1;o++){let a=v.map(n=>n+12*o);if(settings.noCross)a.sort((x,y)=>x-y);if(a[0]<36||a.at(-1)>84)continue;let score=a.reduce((s,n,i)=>s+Math.abs(n-prev[Math.min(i,prev.length-1)]),0);if(score<cost){cost=score;best=a}}}return best}// Consecutive ascending scale degrees use ascending root-position voicings.
-// Other transitions retain the original nearest-voice algorithm.
+function btn(t,fn,a=false,d=false){let b=document.createElement('button');b.textContent=t;b.className=(a?'active ':'')+(d?'dia':'');b.onclick=fn;return b}N.forEach((n,i)=>$('key').add(new Option(n,i)));Object.entries(SCALES).forEach(([k,s])=>$('scale').add(new Option(s[0],k)));['key','scale','degree','showScale','showPianoScale'].forEach(k=>$(k).onchange=render);// Global register-aware voice leading. Optimize each contiguous phrase, not only the previous chord.
 function explicitInversion(c){return !!c&&Number.isInteger(c[2])&&c[2]>=0&&c[2]<T[c[1]].length}
-function inversionVoice(c,prev){const intervals=T[c[1]],bass=48+c[0]+intervals[c[2]],base=intervals.map((n,i)=>{let p=48+c[0]+n;if(i!==c[2])while(p<=bass)p+=12;return p}).sort((a,b)=>a-b);const anchor=prev?prev[0]:48+c[0];const shift=12*Math.round((anchor-bass)/12);return base.map(n=>n+shift)}
 function ascendingDegree(a,b,sc){
  if(!a||!b||explicitInversion(a)||explicitInversion(b)||!isDia(a)||!isDia(b))return false;
- const i=sc.indexOf(a[0]);
- return i>=0&&sc[(i+1)%sc.length]===b[0];
+ const i=sc.indexOf(a[0]);return i>=0&&sc[(i+1)%sc.length]===b[0];
+}
+function inversionBase(c){
+ const intervals=T[c[1]],bass=48+c[0]+intervals[c[2]];
+ return intervals.map((n,i)=>{let p=48+c[0]+n;if(i!==c[2])while(p<=bass)p+=12;return p}).sort((a,b)=>a-b);
+}
+function foldedBase(c){return T[c[1]].map(n=>48+c[0]+n).map(n=>n>71?n-12:n).sort((a,b)=>a-b)}
+function voicingCandidates(c,ascending){
+ const base=foldedBase(c);
+ const shapes=explicitInversion(c)?[inversionBase(c)]:ascending?[T[c[1]].map(n=>48+c[0]+n)]:base.map((_,k)=>base.slice(k).concat(base.slice(0,k).map(n=>n+12)));
+ const candidates=[],seen=new Set();
+ for(const shape of shapes)for(let o=-3;o<=3;o++){
+  const notes=shape.map(n=>n+12*o).sort((a,b)=>a-b);
+  // Bass stays near the reference register; upper extensions have room to ring.
+  if(notes[0]<43||notes[0]>64||notes.at(-1)>84)continue;
+  const key=notes.join(',');if(seen.has(key))continue;seen.add(key);candidates.push(notes);
+ }
+ return candidates;
+}
+function registerCost(ns){
+ const bass=ns[0],top=ns.at(-1),mean=ns.reduce((s,n)=>s+n,0)/ns.length;
+ return .07*(mean-58)**2+.055*(bass-51)**2+.12*Math.max(0,top-74)**2;
+}
+function transitionCost(a,b){
+ const count=Math.max(a.length,b.length);let motion=0;
+ for(let i=0;i<count;i++){const x=a[Math.round(i*(a.length-1)/(count-1))],y=b[Math.round(i*(b.length-1)/(count-1))];motion+=Math.abs(x-y)}
+ return 1.6*motion/count+.35*Math.abs(a[0]-b[0])+.2*Math.abs(a.at(-1)-b.at(-1));
+}
+function optimizePhrase(chords,sc){
+ if(!chords.length)return [];
+ const rises=chords.map((c,i)=>i>0&&ascendingDegree(chords[i-1],c,sc));
+ const choices=chords.map((c,i)=>voicingCandidates(c,rises[i]||!!rises[i+1]));
+ const first=chords[0],preferred=explicitInversion(first)?inversionBase(first):rises[1]?T[first[1]].map(n=>48+first[0]+n):foldedBase(first);
+ // Keep the initial automatic chord's original inversion when possible; optimize its octave with the phrase.
+ if(!explicitInversion(first)&&!rises[1]){
+  const matching=choices[0].filter(ns=>mod(ns[0])===mod(preferred[0]));if(matching.length)choices[0]=matching;
+ }
+ const layers=choices.map((cs,i)=>cs.map(ns=>({notes:ns,cost:i===0?registerCost(ns)+.2*transitionCost(preferred,ns):Infinity,prev:-1})));
+ for(let i=1;i<layers.length;i++){
+  const exactRise=rises[i]?mod(chords[i][0]-chords[i-1][0]):0;
+  for(const current of layers[i])for(let p=0;p<layers[i-1].length;p++){
+   const previous=layers[i-1][p],delta=current.notes[0]-previous.notes[0];
+   // Preserve the existing rising diatonic sequence behavior wherever the bounded register permits.
+   const riseCost=exactRise&&delta!==exactRise?45+Math.abs(delta-exactRise)*2:0;
+   const cost=previous.cost+transitionCost(previous.notes,current.notes)+registerCost(current.notes)+riseCost;
+   if(cost<current.cost){current.cost=cost;current.prev=p}
+  }
+ }
+ let j=0;const tail=layers.at(-1);for(let k=1;k<tail.length;k++)if(tail[k].cost<tail[j].cost)j=k;
+ const result=Array(chords.length);for(let i=layers.length-1;i>=0;i--){const choice=layers[i][j];result[i]=choice.notes;j=choice.prev}
+ return result;
 }
 function all(sequence=seq){
- const v=[],sc=scale();
- sequence.forEach((c,i)=>{
-  if(!c){v.push([]);return}const prev=v.at(-1)?.length?v.at(-1):null,fromPrevious=ascendingDegree(sequence[i-1],c,sc),toNext=ascendingDegree(c,sequence[i+1],sc);
-  if(explicitInversion(c)){v.push(inversionVoice(c,prev));return}
-  if(fromPrevious||toNext){
-   let root=48+c[0];
-   if(fromPrevious)root=prev[0]+mod(c[0]-sequence[i-1][0]);
-   else if(prev)root+=12*Math.round((prev[0]-root)/12);
-   v.push(T[c[1]].map(n=>root+n).sort((a,b)=>a-b));
-  }else v.push(voice(c,prev));
- });
- return v.map(ns=>(settings.noCross?[...ns].sort((a,b)=>a-b):ns).map(n=>n+octaveShift()));
+ const result=[],sc=scale();let phrase=[];
+ const flush=()=>{if(phrase.length){result.push(...optimizePhrase(phrase,sc));phrase=[]}};
+ for(const chord of sequence){if(chord)phrase.push(chord);else{flush();result.push([])}}flush();
+ return result.map(ns=>(settings.noCross?[...ns].sort((a,b)=>a-b):ns).map(n=>n+octaveShift()));
 }
 // Display only: the selected chord data and actual voicing remain unchanged.
 function actualChordName(c,notes){
